@@ -21,6 +21,9 @@
  */
 package org.jboss.as.quickstarts.ha.singleton;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.logging.Logger;
 
 import javax.annotation.PostConstruct;
@@ -50,9 +53,70 @@ public class SingletonTimer {
     @Resource
     private TimerService timerService;
 
+    private String getNodeName() {
+
+        return System.getProperty("jboss.node.name", "undefined");
+    }
+
+    public SingletonTimer() {
+
+        delayInitializationIfConfigured();
+
+    }
+
+    private String getInitDelayNodeName() {
+
+        return System.getProperty("test.delay_init_node");
+
+    }
+
+    private String getMarkerFilenameDirectory() {
+
+        return System.getProperty("test.outdir", "/tmp");
+
+    }
+
+    private String getMarkerFilename() {
+
+        return System.getProperty("test.outfile.prefix", "test-output-for-")
+                + getNodeName() + "-T" + Thread.currentThread().getId();
+    }
+
+    /**
+     * Delay during instantiation seems to affect timing of leader election.
+     * 
+     * Node started observed to be considered "oldest" and may be useful as kludge around problem.
+     */
+    private void delayInitializationIfConfigured() {
+
+        if (getNodeName().equals(getInitDelayNodeName())) {
+            LOGGER.info("Delaying initialization...");
+            try {
+                Thread.sleep(2000);
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+
+    }
+
+    private void writeMarkerFile() {
+
+        try {
+
+            Files.write(Paths.get(getMarkerFilenameDirectory(), getMarkerFilename()), "Hello".getBytes());
+
+        } catch (IOException e) {
+            throw new RuntimeException("Unhandled exception", e);
+        }
+    }
+
     @PostConstruct
     public void initialize() {
-        LOGGER.warning("SingletonTimer is initializing.");
+
+        LOGGER.warning("SingletonTimer is initializing on " + getNodeName());
+
+        writeMarkerFile();
 
         // For the demonstration just output a Hello World log every 5 seconds.
         ScheduleExpression scheduleExpression = new ScheduleExpression().hour("*").minute("*").second("0/5");
@@ -65,11 +129,13 @@ public class SingletonTimer {
 
     @Timeout
     public void scheduler(Timer timer) {
-        LOGGER.info("SingletonTimer: " + timer.getInfo());
+
+        LOGGER.info("SingletonTimer: " + timer.getInfo() + " on " + getNodeName());
     }
 
     @PreDestroy
     public void stop() {
+
         LOGGER.warning("SingletonTimer is stopping: the server is either being shutdown or another node has " +
                 "become elected to be the singleton master.");
     }
