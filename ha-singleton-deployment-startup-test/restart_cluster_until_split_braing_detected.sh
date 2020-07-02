@@ -3,7 +3,9 @@
 home=$(dirname $0)
 
 while $home/start_cluster.sh; do
-    true
+
+    echo Running test again..
+
 done
 
 

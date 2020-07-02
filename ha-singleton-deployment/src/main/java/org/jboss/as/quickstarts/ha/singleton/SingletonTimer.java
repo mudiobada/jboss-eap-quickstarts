@@ -24,6 +24,13 @@ package org.jboss.as.quickstarts.ha.singleton;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.DelayQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 import javax.annotation.PostConstruct;
@@ -36,6 +43,7 @@ import javax.ejb.Timeout;
 import javax.ejb.Timer;
 import javax.ejb.TimerConfig;
 import javax.ejb.TimerService;
+import javax.swing.plaf.SliderUI;
 
 /**
  * This class implements demonstration singleton deployment @Startup @Singleton which for the purposes of the quickstart
@@ -53,9 +61,19 @@ public class SingletonTimer {
     @Resource
     private TimerService timerService;
 
+    private static final Queue<Object[]> memoryHug = new ArrayDeque<>();
+
+    private static final AtomicBoolean doAllocate = new AtomicBoolean(true);
+
     private String getNodeName() {
 
         return System.getProperty("jboss.node.name", "undefined");
+    }
+
+    private String getTestOutOfMemoryNode() {
+
+        return System.getProperty("test.oom", "undefined");
+
     }
 
     public SingletonTimer() {
@@ -111,6 +129,32 @@ public class SingletonTimer {
         }
     }
 
+    // Allocate small objects to make things hard for everyone... 
+    private void allocateMemoryForError() {
+
+        try {
+            if (doAllocate.get()) {
+                LOGGER.info("Allocating memory for OOM currenty at " + memoryHug.size() + "kb");
+                for (int i = 0; i < 8 * 1024; i++) {
+                    final Byte[] mem = new Byte[1024];
+                    memoryHug.add(mem);
+                }
+            } else {
+
+            }
+        } catch (OutOfMemoryError e) {
+            doAllocate.set(false);
+            LOGGER.info("Waiting a bit before releasing memory for OOM");
+            try {
+                Thread.sleep(120_000);
+            } catch (InterruptedException ignore) {
+            }
+            memoryHug.clear();
+            LOGGER.info("Released all memory after OOM");
+        }
+
+    }
+
     @PostConstruct
     public void initialize() {
 
@@ -130,7 +174,14 @@ public class SingletonTimer {
     @Timeout
     public void scheduler(Timer timer) {
 
-        LOGGER.info("SingletonTimer: " + timer.getInfo() + " on " + getNodeName());
+        LOGGER.info("SingletonTimer: " + timer.getInfo()
+                + " on '" + getNodeName() + "'"
+                + " with oom test node '" + getTestOutOfMemoryNode() + "'");
+
+        if (getTestOutOfMemoryNode().equals(getNodeName())) {
+            allocateMemoryForError();
+        }
+
     }
 
     @PreDestroy

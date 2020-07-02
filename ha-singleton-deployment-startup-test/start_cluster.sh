@@ -4,11 +4,23 @@ home=$(dirname $(readlink -f $0))
 
 set -e -u
 
-if [ -z "${JBOSS_HOME+x}" ]; then
-    export JBOSS_HOME=/opt/jboss-eap-7.1.1
+export JBOSS_HOME=/opt/jboss-eap-7.1.1
+#export JBOSS_HOME=/local/obadmud/opt/jboss-eap-7.3.1
+
+# Test OOM on given node
+test_oom=node2
+
+# Stop test after delay seconds
+if [ "$test_oom" = true ]; then
+   auto_stop_delay=80
+else
+   auto_stop_delay=600
 fi
+enable_trace_logging=false
 
 tmpdir=/tmp/$USER/ha-singleton-startup-test
+
+rm -fr $tmpdir
 mkdir -p $tmpdir
 
 jar="$home/../ha-singleton-deployment/target/ha-singleton-deployment.jar"
@@ -23,6 +35,17 @@ fi
 
 export port_offset_prefix=1${env_number#0} 
 export port_offset_base=$(($port_offset_prefix * 100))
+
+function enable_trace_logging() {
+
+    local filename=$1
+
+    # Profile verbose of everything...
+    perl -p -i -e '
+        s{<level name="\w+"/>}{<level name="TRACE"/>};
+    ' $filename
+
+}
 
 function adapt_jboss_ports() {
 
@@ -54,16 +77,34 @@ function adapt_jboss_ports() {
 
 }
 
+function adapt_default_election_policy() {
+
+    local filename=$1
+
+    #   <subsystem xmlns="urn:jboss:domain:singleton:1.0">
+    #       <singleton-policies default="default">
+    #           <singleton-policy name="default" cache-container="server">
+    #               <simple-election-policy/>
+    #
+    perl -p -i -e '
+                s{<simple-election-policy/>}{
+                    <simple-election-policy>
+                        <name-preferences>node1 node2</name-preferences>
+                    </simple-election-policy>
+                 };
+    ' $filename
+
+}
+
 function start_cluster_nodes() {
 
-    for nodeId in 1 2 ; do
+    for nodeId in 2 1 ; do
 
        multicast_address=239.2.$(($port_offset_base / 100)).1
        port_offset=$(($port_offset_base + ($nodeId - 1) * 10))
 
        nodeDir="$tmpdir/jb-$nodeId"
 
-       rm -fr $nodeDir
        mkdir -p $nodeDir
 
        export JBOSS_BASE_DIR=$nodeDir/standalone
@@ -73,19 +114,35 @@ function start_cluster_nodes() {
        # Manual deployment that should be available on start
        cp -a $jar $JBOSS_BASE_DIR/deployments/
 
-       rm -f $tmpdir/ha-singleton-provider-is-*
-
+       conf_file=$JBOSS_BASE_DIR/configuration/standalone-ha.xml
+       
        if [ $env_number != "000" ]; then
-           adapt_jboss_ports $JBOSS_BASE_DIR/configuration/standalone-ha.xml
+           adapt_jboss_ports $conf_file
+       fi
+
+       if [ "$enable_trace_logging" = "true" ]; then
+           export GC_LOG="true"
+           enable_trace_logging $conf_file
+       fi
+
+       # adapt_default_election_policy $conf_file
+
+       if [ -n "$test_oom" -a $nodeId -eq 2 ]; then
+          export JAVA_OPTS="-Xmx512m"
        fi
 
        ${JBOSS_HOME}/bin/standalone.sh -c standalone-ha.xml \
             -Dtest.outfile.prefix="ha-singleton-provider-is-" \
             -Dtest.outdir="$tmpdir" \
+            -Dtest.oom=node2 \
             -Djboss.node.name=node$nodeId \
             -Djboss.default.multicast.address=$multicast_address \
-            -Djboss.socket.binding.port-offset=$port_offset &
+            -Djboss.socket.binding.port-offset=$port_offset > "$nodeDir/console.log" &
 
+       if [ -n "$test_oom" -a $nodeId -eq 2 ]; then
+            # Give node2 time to become singleton provider
+            sleep 20
+       fi
     done
 
 }
@@ -103,18 +160,24 @@ function kill_jobs() {
 
 trap kill_jobs $trap_sigs
 
-delay=4
-for i in $(seq 10 -1 1); do
-   echo Wating for Ctrl-C to kill $job_pids or timeout in about $(($i * $delay)) seconds ...
-   sleep $delay
-done
+# Auto kill after timeout?
+if [ $auto_stop_delay -gt 0 ]; then
 
-echo "Unregistering cleanup callback and shutting down"
-trap
-trap - $trap_sigs
+    delay=10
+    delay_count=$(($auto_stop_delay / $delay))
 
-kill_jobs
+    for i in $(seq $delay_count -1 1); do
+       echo Wating for Ctrl-C to kill $job_pids or timeout in about $(($i * $delay)) seconds ...
+       sleep $delay
+    done
 
+    echo "Unregistering cleanup callback and shutting down"
+    trap
+    trap - $trap_sigs
+
+    kill_jobs
+
+fi
 
 echo Wating for shutdown of $job_pids ...
 wait
